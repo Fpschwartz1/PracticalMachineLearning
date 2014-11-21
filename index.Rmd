@@ -1,0 +1,205 @@
+---
+title: "Predicting how subjects performed barbell exercises"
+author: "Fabiano Peruzzo Schwartz"
+output: html_document
+---
+
+##Sinopsys
+
+This report is based on the study of *[Velloso et al.](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201)*, who used data from accelerometers on the belt, forearm, arm and dumbbell of 6 volunteers in order to quantify how well they did the barbell lifts. The main goal here is to describe the method proposed to predict the manner in which they did the exercises in 20 different test cases. The approach consisted on the application of variable reduction techniques so as to fit the training dataset to a parsimonious Ramdom Forests model with high prediction accuracy (accuracy = 0.976). The predicted results were submitted to the Coursera's Prediction Assignment Submission module and each of them did match the respective correct answer.
+
+##Exploratory analysis
+
+The first thing to do is to read the data sets and take a look at their dimensions. 
+
+```{r}
+training <- read.csv("pml-training.csv")
+testing  <- read.csv("pml-testing.csv")
+paste("training:", {d1<-dim(training)}[1], d1[2],"     testing: ", {d2<-dim(testing)}[1], d2[2])
+```
+
+Despite the statement of the course project and based only on the name of data sets, one could imagine that **testing** should be used for cross-validation. However, **testing** has much less observations (`r d2[1]`) than **training** (`r d1[1]`) which means that **training** must be split for cross-validation. Another thing to check is whether the variables are the same for both data sets.
+
+```{r}
+v1 <- which(!(names(training) %in% names(testing)))
+v2 <- which(!(names(testing) %in% names(training)))
+cat(paste0("The variable of 'training' which is not in 'testing' is named '",names(training)[v1],"' (position: ",v1,")\nThe variable of 'testing' which is not in 'training' is named '",names(testing)[v2],"' (position: ",v2,")"))
+```
+
+The results above show that there is a difference at the position `r v1` in which the variable **`r names(training)[v1]`** (which contains the manner a subject did the exercise) was replaced by **`r names(testing)[v2]`** in **testing** data set. This fact confirms that **testing** is only for prediction of the test cases.
+
+Visual inspection revealed that lots of variables have great amount of NAs. Ten of them are shown below just to exemplify. This phenomenon deserves proper treatment.
+
+```{r}
+str(training[,c(18:19,21:22,27:32)])
+```
+
+##Preparing data
+
+Before cross-validation, it is need to prepare the training dataset so as to avoid predictors which can cause the model to fail. Let's start by treating NAs. The simple fact that a variable contains null values is not sufficient reason to remove it from the prediction model. However, if the rate of NAs is very high, there is also no reason to believe that the variable is useful in prediction. In order to be rigorous, all the variables whose percentage exceeded 95% of NAs were removed.
+
+```{r}
+nc.1 <- ncol(training)
+# identifies the predictors whose percentage exceeds 95% of NAs in training dataset
+pna <- is.na(training)
+pna <- colSums(pna)/dim(training)[1]
+pna <- as.vector(pna>0.95)
+pna <- which(pna %in% TRUE)
+# removes the predictors whose percentage exceeds 95% of NAs
+training <- training[-pna]
+testing  <- testing[-pna]
+# 
+nc.2 <- ncol(training)
+paste0("Reduced amount of variables from ", nc.1, " to ", nc.2)
+```
+
+Datasets come sometimes with predictors that take an unique value across samples (near zero-variance predictors). This kind of predictor is not only non-informative, it can break some models we may want to fit to data. Even more common is the presence of predictors that are almost constant across samples. One possible solution is to remove all predictors that satisfy some threshold criterion related to their variance. The function **nearZeroVar** diagnoses predictors that have one unique value or predictors that have both of the following characteristics: they have very few unique values relative to the number of samples (uniqueCut) and the ratio of the frequency of the most common value to the frequency of the second most common value (freqCut) is large.
+
+Removing predictors is not always the best solution. Binary predictors such as dummy variables are likely to have low percentages and should not be discarded for this simple reason. Therefore, it was used the default values for uniqueCut (10) and freqCut (95/5) which are rigorous enough settings.
+
+```{r}
+library(caret)
+
+nc.1 <- ncol(training)
+# identify the positions of the zero or near-zero predictors
+nzv <- nearZeroVar(training, freqCut = 95/5, uniqueCut = 10, saveMetrics = FALSE)
+# removes near-zero predictors
+training <- training[-nzv]
+testing  <- testing[-nzv]
+#
+nc.2 <- ncol(training)
+paste0("Reduced amount of variables from ", nc.1, " to ", nc.2)
+```
+
+It is also needed to remove descriptive fields which have no predictive power or carry no additional information about exercise types.
+
+```{r}
+nc.1 <- ncol(training)
+# removing fields which have no additional information about exercise types
+training <- training[-c(1:6)]
+#
+nc.2 <- ncol(training)
+paste0("Reduced amount of variables from ", nc.1, " to ", nc.2)
+```
+
+Now we are ready for spliting the **training** data set.
+
+```{r}
+inTrain <- createDataPartition(training$classe, p=0.75, list = FALSE)
+train <- training[inTrain,]
+test <- training[-inTrain,]
+```
+
+##Fitting the model
+
+The function **train** of caret package with default options (simple bootstrap resampling method configured to three repeats of 10-fold cross-validation) was used for fitting the prediction model.
+
+Random Forests were chosen since they are good to use as a first cut when we don't know the underlying model, or when we need to produce a decent model under severe time pressure ([kaggle](https://www.kaggle.com/wiki/RandomForests)). Unlike single decision trees which are likely to suffer from high variance or high bias (depending on how they are tuned) Random Forests use averaging to find a natural balance between the two extremes. Moreover, Random Forests have very few parameters to tune and can be used quite efficiently with default parameter settings (i.e. they are effectively non-parametric).
+
+After data preparation, `r nc.2` variables still remained in data set. When the number of variables is very large, forests can be run once with all the variables, then run again using only the [most important variables](https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#varimp) from the first run.
+
+```{r, cache=TRUE}
+# running once with all the variables
+t <- Sys.time()
+modelFit1 <- train(classe ~ ., data=train, method="rf", importance=TRUE)
+paste("Processing time:",round(as.numeric(difftime(Sys.time(),t,units="hours")),4),"hours")
+
+```
+
+To measure the [importance of variables](http://en.wikipedia.org/wiki/Random_forest) after training, the values of variables are permuted among the training data and the out of sample (or out of bag) error is again computed on this perturbed data set. The importance score for a variable is computed by averaging the difference in out of sample error before and after the permutation over all trees. The score is normalized by the standard deviation of these differences. Variables which produce large values for this score are ranked as more important than the ones which produce small values.
+
+```{r}
+# importance of variables
+varI <- varImp(modelFit1)
+```
+
+Typically, we should look for a large break between variables to decide how many important variables to choose. Here I arbitrarily chose the first twenty variables for readjusting the model.
+
+```{r, fig.width=9, fig.height=9, warning=FALSE}
+varI[[1]] <- varI[[1]][1:20,]
+p <- plot(varI)
+plot(varI, main = "Fig. 1 - The first twenty most important variables")
+```
+```{r, cache=TRUE}
+# the first twenty most important variables
+train <- train[,c(names(train[,p$y.limits]),"classe")]
+test  <- test[,c(names(train[,p$y.limits]),"classe")]
+# readjusting the model
+t <- Sys.time()
+modelFit <- train(classe ~ ., data = train, method="rf",importance=TRUE)
+paste("Processing time:",round(as.numeric(difftime(Sys.time(),t,units="auto")),4),"hours")
+```
+
+For illustration, I plotted below three of the first twenty more important variables versus their samples. In order to visually compare them, they were normalized by each respective maximum value.
+
+Figure 2 shows that the most important variable (roll_belt) has a strongly polarized behavior (or variance) which seems to work well for decision trees and justify the high importance.
+
+```{r, fig.width=12, fig.height=5, warning=FALSE}
+library(gridExtra)
+sample <- 1:length(train$classe)
+
+# showing the most important variable
+nroll_belt <- train$roll_belt/max(train$roll_belt)
+q1<-qplot(sample,nroll_belt,colour=classe,data=train,geom="boxplot")
+q2<-qplot(sample,nroll_belt,colour=classe,data=train,geom=c("boxplot","jitter"))
+grid.arrange(q1, q2, ncol=2, main = "Fig. 2 - The most important variable: roll_belt")
+```
+
+Figure 3 shows a variable (magnet_belt_y) whose importance score is in the middle of the twenty most important. We can observe less polarization and more spread data.
+
+```{r, fig.width=12, fig.height=5, warning=FALSE}
+# showing a variable with mean importance
+nmagnet_belt_y <- train$magnet_belt_y/max(train$magnet_belt_y)
+q1<-qplot(sample,nmagnet_belt_y,colour=classe,data=train,geom="boxplot")
+q2<-qplot(sample,nmagnet_belt_y,colour=classe,data=train,geom=c("boxplot","jitter"))
+grid.arrange(q1, q2, ncol=2, main = "Fig. 3 - Variable with mean importance: magnet_belt_y")
+```
+
+Figure 4 shows the less important variable (gyros_arm_z) among the twenty most important. Based on the previous observations, we could expect that the lower the importance, the greater the scattering. It seems to be the behavior shown below for the gyros_arm_z variable.
+
+```{r, fig.width=12, fig.height=5, warning=FALSE}
+# showing the less important variable
+ngyros_arm_z <- train$gyros_arm_z/max(train$gyros_arm_z)
+q1<-qplot(sample,ngyros_arm_z,colour=classe,data=train,geom="boxplot")
+q2<-qplot(sample,ngyros_arm_z,colour=classe,data=train,geom=c("boxplot","jitter"))
+grid.arrange(q1, q2, ncol=2, main = "Fig. 4 - The less important variable: gyros_arm_z")
+```
+
+##Evaluating the accuracy
+
+After fitting the final model, we need to know how good it is by estimating the model error. There are two types of errors: in sample error - the error rate we get on
+the same data we used to train our predictors; out of sample error - the error rate we get on a new data.
+
+Since the prediction algorithm will tune itself a little bit to the noise collected in training data set, **in sample errors** are always less than **out of sample errors**. The reason is overfitting. Basically, we're matching our algorithm to the data that we
+have at hand, and we're matching it a little bit too well. Therefore, when we get a new data set, there'll be different noise, and so the accuracy will go down a little bit. This can be verified bellow.
+
+**In sample error**
+
+```{r}
+# in sample error
+pred <- predict(modelFit, train)
+accuracy <- confusionMatrix(train$classe, pred)
+accuracy
+paste0(names(accuracy$overall[1]), ": ", as.numeric(accuracy$overall[1]), "     In sample error rate: ", 1-as.numeric(accuracy$overall[1]))
+```
+
+**Out of sample error**
+
+```{r}
+# out of sample error
+pred <- predict(modelFit, test)
+accuracy <- confusionMatrix(test$classe, pred)
+accuracy
+paste0(names(accuracy$overall[1]), ": ", as.numeric(accuracy$overall[1]), "     Out of sample error rate: ", 1-as.numeric(accuracy$overall[1]))
+```
+
+Out of sample errors is what we care about in order to be able to see the realistic expectation of how well that machine running algorithm will perform on new data.
+
+##Final test set classification
+
+Finally, the prediction model was used to predict the 20 test cases. The predicted results were submitted to the Coursera's Prediction Assignment Submission module and each of them did match the respective correct answer.
+
+```{r}
+# final test set classification
+predict(modelFit, testing[,names(train[,p$y.limits])])
+```
